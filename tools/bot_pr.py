@@ -23,6 +23,7 @@ Needs only git, gh and a host python: it runs before the project's build system 
 import argparse
 import os
 import subprocess
+import time
 from pathlib import Path
 
 # Actions points this at the checkout. Everything below runs there rather than wherever the caller
@@ -90,6 +91,17 @@ def start_ci(name: str) -> None:
 
     A pull request opened with the default GITHUB_TOKEN does not start CI workflows.
     """
+    # GitHub creates the approval-waiting run of the "opened" event late, for whatever commit the branch
+    # has by then, and the pull request shows only the newest run of a workflow. So wait for that run to
+    # land on the commit this replaces, rather than on the one the push below gets CI to run for.
+    pushed = git("rev-parse", "HEAD")
+    runs = f"repos/{{owner}}/{{repo}}/actions/runs?head_sha={pushed}&event=pull_request"
+    deadline = time.monotonic() + 300
+    while not int(gh("api", runs, "--jq", ".total_count")):
+        if time.monotonic() > deadline:
+            raise SystemExit(f"bot_pr: no pull_request run for {pushed} after 5 minutes")
+        time.sleep(5)
+
     # needs to change something to get a different SHA, so bump commit time
     later = int(git("log", "-1", "--format=%ct")) + 1
     amend = ["git", "commit", "--amend", "--no-edit"]
