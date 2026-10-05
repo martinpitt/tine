@@ -11,12 +11,15 @@
 name: accept reproducibility digest changes
 
 on:
-  pull_request:
+  # pull_request_target is necessary to get access to the "self" environment. This workflow
+  # only runs on origin branches, but be extra careful: This only runs code from main,
+  # and then pushes the data to the branch's expected.json.
+  pull_request_target:
     types: [labeled]
 
 permissions:
   actions: read
-  contents: write
+  contents: read
   pull-requests: write
 
 concurrency:
@@ -24,27 +27,35 @@ concurrency:
 
 jobs:
   update:
-    # does not work on a fork: we only get a read-only token for that
+    # The deploy key pushes to this repository; a fork's branch is not in it.
     if: github.event.label.name == 'update-reproducibility' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: self
     env:
       GH_TOKEN: ${{ github.token }}
       HEAD_REF: ${{ github.event.pull_request.head.ref }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       PULL_REQUEST: ${{ github.event.pull_request.number }}
+      # the pull request's commit, outside the workspace that Buck runs in
+      PULL_REQUEST_TREE: /tmp/pull-request
     steps:
-      # the commit CI ran on, rather than whatever the branch has moved on to since
       - name: Clone repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          # The amend keeps the parents of this commit, and in a clone of it alone it has none.
-          fetch-depth: 2
+          # no ref:, but the default branch (main), as we run under pull_request_target; no code from the PR!
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
 
-      # refresh-expected runs in a box
       - name: GH runner setup
         uses: ./.github/actions/gh-runner-setup
+
+      # The commit CI ran on, rather than whatever the branch has moved on to since. With its parent,
+      # which the amend keeps.
+      - name: Check out the pull request
+        run: |
+          git fetch --depth 2 origin "$HEAD_SHA"
+          git worktree add --detach "$PULL_REQUEST_TREE" "$HEAD_SHA"
+          cp "$PULL_REQUEST_TREE/examples/image/expected.json" examples/image/expected.json
 
       - name: Find the failed CI run
         id: ci
@@ -69,12 +80,14 @@ jobs:
 
       - name: Accept the digests
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email 'noreply@amutable.com'
-          bin/tine buck run tine//examples/image:refresh-expected -- --amend
+          bin/tine buck run tine//examples/image:refresh-expected
+          cp examples/image/expected.json "$PULL_REQUEST_TREE/examples/image/expected.json"
+          git -C "$PULL_REQUEST_TREE" config user.name 'github-actions[bot]'
+          git -C "$PULL_REQUEST_TREE" config user.email 'noreply@amutable.com'
+          git -C "$PULL_REQUEST_TREE" commit --amend --no-edit -- examples/image/expected.json
 
       - name: Update the branch
-        run: git push --force-with-lease="refs/heads/$HEAD_REF:$HEAD_SHA" origin "HEAD:refs/heads/$HEAD_REF"
+        run: git -C "$PULL_REQUEST_TREE" push --force-with-lease="refs/heads/$HEAD_REF:$HEAD_SHA" origin "HEAD:refs/heads/$HEAD_REF"
 
       - name: Remove the label
         if: always()
