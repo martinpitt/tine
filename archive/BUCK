@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""Shared archive primitives."""
+
+load("//box:test.bzl", "box_python_test")
+load("//python:defs.bzl", "tine_python_library")
+
+tine_python_library(
+    name = "cpio",
+    srcs = ["cpio.py"],
+    visibility = ["tine//..."],
+    deps = ["//:util"],
+)
+
+tine_python_library(
+    name = "tar",
+    srcs = ["tar.py"],
+    visibility = ["tine//..."],
+)
+
+box_python_test(
+    name = "test",
+    box = "//tools:dev.box",
+    srcs = ["cpio.py", "cpio_test.py", "tar.py", "tar_test.py"],
+    deps = ["//:util"],
+)

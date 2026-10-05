@@ -1,0 +1,27 @@
+#!/usr/bin/python3 -SIB
+
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""Run tine from its importable module."""
+
+import sys
+from pathlib import Path
+
+
+def main() -> None:
+    """Load the module beside this command and pass its arguments through."""
+    # Fail before parsing tine.py's 3.12 syntax, so an old host gets one useful error.
+    if sys.version_info < (3, 12):  # noqa: UP036
+        raise SystemExit("tine: Python 3.12 or newer is required")
+    # Isolated mode omits source directories from sys.path; resolve the command so a symlink still
+    # loads every module from its own checkout. The cell root is on it for the shared helpers.
+    directory = Path(__file__).resolve().parent
+    sys.path[:0] = [str(directory), str(directory.parent), str(directory.parent / "box")]
+    import tine
+
+    tine.main(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    main()

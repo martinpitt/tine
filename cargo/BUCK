@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""Rust source builds against a vendored, hash-pinned crate tree."""
+
+load("//box:test.bzl", "box_python_test")
+load("//python:defs.bzl", "tine_python_binary")
+
+# The project's source artifacts in, its workspace root and resolved lock out.
+tine_python_binary(
+    name = "lock",
+    main = "lock.py",
+    visibility = ["PUBLIC"],
+    deps = ["//:specs", "//:util"],
+)
+
+# The downloaded crates in, the directory cargo builds against out.
+tine_python_binary(
+    name = "vendor",
+    main = "vendor.py",
+    visibility = ["PUBLIC"],
+    deps = ["//:specs"],
+)
+
+# Runs inside the box: the source tree and its vendored crates in, the declared binaries out.
+tine_python_binary(
+    name = "build",
+    main = "build.py",
+    visibility = ["PUBLIC"],
+    deps = [
+        "//:specs",
+        "//:util",
+    ],
+)
+
+box_python_test(
+    name = "test",
+    box = "//tools:dev.box",
+    srcs = [
+        "build.py",
+        "cargo_test.py",
+        "lock.py",
+        "vendor.py",
+    ],
+    deps = ["//:specs", "//:util"],
+)

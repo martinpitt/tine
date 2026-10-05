@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""The command a checkout builds through."""
+
+load("//box:test.bzl", "box_python_test")
+load("//python:defs.bzl", "tine_python_library")
+
+# How the launcher reads the cache settings and talks to a running shim, for the round trip in
+# tests/, which judges a build by the shim's own counters.
+tine_python_library(
+    name = "cache_shim",
+    srcs = ["cache_shim.py"],
+    visibility = ["tine//tests/..."],
+    deps = ["//:util"],
+)
+
+box_python_test(
+    name = "test",
+    box = "//tools:dev.box",
+    # Runtime path setup handles imports, but the type checker still needs the dependency.
+    deps = [
+        "//:util",
+        "//box:isolation",
+        # For the status socket the launcher and the shim have to agree on.
+        "//remote_cache:lib",
+    ],
+    srcs = [
+        "cache_shim.py",
+        "cache_shim_test.py",
+        "tine",
+        "tine.py",
+        "tine_test.py",
+        "//:buckconfig",
+    ],
+)

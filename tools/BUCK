@@ -1,0 +1,317 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""Pinned tool binaries and development commands fetched by Buck."""
+
+load("//box:defs.bzl", "box")
+load("//python:defs.bzl", "tine_python_binary")
+load(":defs.bzl", "http_tool")
+load(":tools.json", _pins = "value")
+
+_RELEASE = "tine//catalog:fedora.rawhide.release"
+
+# Every pinned tool is declared in ./tools.json and refreshed by `bump` (see docs/user/images.md). Buck
+# fetches and verifies all but one: `bin/tine` fetches Buck2 itself.
+
+# Relocatable bootstrap Python; 3.14 provides stdlib zstd for RPM payloads.
+# PUBLIC: the toolchain reaching it is `tine//:python_bootstrap`, and a project that declares a
+# `toolchains` cell of its own rather than aliasing this one forwards to that target from outside.
+http_tool(
+    name = "python3",
+    args = ["-B"],
+    path = "bin/python3",
+    spec = _pins["python3"],
+    visibility = ["PUBLIC"],
+)
+
+# Starlark formatter, published as a bare zstd-compressed binary alongside Buck itself; both are
+# declared in tools.json, so one `bump` run keeps them from the same release.
+http_tool(
+    name = "starlark-fmt",
+    compressed = True,
+    spec = _pins["starlark-fmt"],
+)
+
+# Decompressor for the above; the pinned CPython is new enough to have zstd in its standard library.
+tine_python_binary(
+    name = "unzstd",
+    main = "unzstd.py",
+)
+
+# Python formatter + linter (static musl builds).
+http_tool(
+    name = "ruff",
+    path = "ruff",
+    spec = _pins["ruff"],
+)
+
+# Python type checker (static musl builds).
+http_tool(
+    name = "ty",
+    path = "ty",
+    spec = _pins["ty"],
+    visibility = ["PUBLIC"],
+)
+
+# SBOM generator (static release binary; not packaged in Fedora). Scans an assembled image tree for the
+# package database, ELF-bundled modules, and other package metadata.
+http_tool(
+    name = "syft",
+    path = "syft",
+    spec = _pins["syft"],
+    visibility = ["PUBLIC"],
+)
+
+# Cargo wrapper that embeds the crate graph in every binary it builds, so SBOM scanners can report
+# what a from-source Rust binary contains. Fedora does not package it, and we
+# can't build it from source yet. https://crates.io/crates/cargo-auditable
+http_tool(
+    name = "cargo-auditable",
+    path = "cargo-auditable",
+    spec = _pins["cargo-auditable"],
+    visibility = ["PUBLIC"],
+)
+
+# S3 server with a plain-HTTP read side, for the remote cache's integration tests. Not packaged in Fedora.
+http_tool(
+    name = "seaweedfs",
+    path = "weed",
+    spec = _pins["seaweedfs"],
+    visibility = [
+        "tine//remote_cache/...",
+        "tine//tests/...",
+    ],
+)
+
+# tine's dev environment for importer and its unit tests. Used by every `box_python_test` suite
+# (hermetic), `tine//tools:importer` (relaxed), and anyone entering it as a box.
+# Derived from the main box (lockless transaction, resolved during the build), so dev tooling
+# changes never invalidate the build graph that depends on the main box.
+box.new(
+    name = "dev.box",
+    packages = [
+        "coreutils",
+        # for "importer srpm"
+        "dist-git-client",
+        "gawk",
+        "git-core",
+        # for the assertions over generated certificates
+        "openssl",
+        "rpm-build",
+        # package_system/rpm's tests sign what they build
+        "gnupg2",
+        "rpm-sign",
+        "python3-createrepo_c",
+        "python3-libdnf5",
+        # the license headers lint, see the `reuse` alias below
+        "reuse",
+        "sed",
+        # The tests of package_system/deb verify a Release with sqv, as verify.py does.
+        "sequoia-sqv",
+    ],
+    release = _RELEASE,
+    visibility = ["PUBLIC"],
+)
+
+# Runtime driver for the source-tree commands below.
+tine_python_binary(
+    name = "dev",
+    main = "dev.py",
+    deps = ["//:util"],
+)
+
+box.python_test(
+    name = "dev-test",
+    box = ":dev.box",
+    srcs = [
+        "dev.py",
+        "dev_test.py",
+    ],
+    env = {
+        "TY_TEST_BINARY": "$(location_exec :ty)",
+        "TY_TEST_BOX": "$(location_exec tine//catalog:fedora.rawhide.box)",
+        "TY_TEST_PYTHON": "$(location_exec :python3)",
+    },
+    deps = ["//:util"],
+)
+
+tine_python_binary(
+    name = "catalog",
+    main = "catalog.py",
+    deps = ["//:util"],
+)
+
+# The dev box carries gpg, which the armoring test reads its output back with.
+box.python_test(
+    name = "catalog-test",
+    box = ":dev.box",
+    srcs = ["catalog.py", "catalog_test.py"],
+    deps = ["//:util"],
+)
+
+# PUBLIC: a consuming project bumps its own tools.json with this, passing --data.
+tine_python_binary(
+    name = "bump-driver",
+    main = "bump.py",
+    deps = ["//:util"],
+    visibility = ["PUBLIC"],
+)
+
+# The ty configuration comes in by label rather than by a path bump works out from tools.json:
+# moving or renaming it then fails here, at analysis time, instead of in the next bump run.
+command_alias(
+    name = "bump",
+    args = ["--data", "$(source tools.json)", "--ty-config", "$(location_exec //:ty-config)"],
+    exe = ":bump-driver",
+)
+
+box.python_test(
+    name = "bump-test",
+    box = ":dev.box",
+    srcs = [
+        "bump.py",
+        "bump_test.py",
+    ],
+    deps = ["//:util"],
+)
+
+# PUBLIC: CI's automatic changes (.github/workflows/bump.yml, used by consuming project as well). A
+# runner invokes it as a plain script with the host python, before Buck has fetched anything;
+# this target is what type checks it.
+tine_python_binary(
+    name = "bot-pr",
+    main = "bot_pr.py",
+    visibility = ["PUBLIC"],
+)
+
+_SOURCE_ARGS = [
+    "--starlark-fmt",
+    "$(location_exec :starlark-fmt)",
+    "--starlark-fmt-config",
+    "$(source starlark-fmt.json)",
+    "--ruff",
+    "$(location_exec :ruff)",
+]
+
+command_alias(
+    name = "lint",
+    args = ["lint"] + _SOURCE_ARGS,
+    exe = ":dev",
+)
+
+# check = lint + `buck test tine//...`. The suites are test targets, not build artifacts, so they
+# cannot come in as `resources`; the driver nests the test run instead.
+command_alias(
+    name = "check",
+    args = ["check"] + _SOURCE_ARGS,
+    exe = ":dev",
+)
+
+# REUSE compliance: every file's SPDX header, plus what REUSE.toml covers instead. Nobody ships a
+# standalone binary for it, so the lint nests this alias rather than taking a pinned tool by path.
+command_alias(
+    name = "reuse",
+    args = ["reuse"],
+    exe = ":dev.box",
+)
+
+# The rpm importer (see docs/user/importer.md): its verbs need the pinned rpm toolchain plus the
+# host's git identity, network, and cwd, so it runs through the dev box's relaxed entry.
+command_alias(
+    name = "importer",
+    args = ["$(source importer.py)"],
+    exe = ":dev.box",
+)
+
+# PKCS#11 signing tokens for testing (ci.sh's secureboot-pkcs11 step): a software TPM, the
+# production tpm2-pkcs11 module on top, and the p11-kit server exposing its tokens to build
+# sandboxes over a socket. See tools/signing-server.
+box.new(
+    name = "swtpm-signing.box",
+    packages = [
+        "bash",
+        "coreutils",
+        # the resource manager swtpm lacks, and the private bus it needs; see tools/signing-server
+        "dbus-daemon",
+        "openssl",
+        "p11-kit-server",
+        "pkcs11-provider",
+        "swtpm",
+        # ukify, to read a UKI section back out in the ci.sh step
+        "systemd-ukify",
+        "tpm2-abrmd",
+        "tpm2-pkcs11",
+        "tpm2-pkcs11-tools",
+        # tpm2_ptool drives these binaries without a package dependency on them
+        "tpm2-tools",
+    ],
+    release = _RELEASE,
+    visibility = ["PUBLIC"],
+)
+
+command_alias(
+    name = "signing-server",
+    args = ["$(source signing-server)"],
+    exe = ":swtpm-signing.box",
+)
+
+box.python_test(
+    name = "importer-test",
+    box = ":dev.box",
+    srcs = [
+        "importer.py",
+        "importer_test.py",
+    ],
+)
+
+# BuildRequires cycle analysis of a branch (pass its label, e.g. //packages/fedora:rawhide's dir).
+command_alias(
+    name = "scc",
+    args = ["scc"],
+    exe = ":dev",
+)
+
+command_alias(
+    name = "fmt",
+    args = [
+        "fmt",
+        "--starlark-fmt",
+        "$(location_exec :starlark-fmt)",
+        "--starlark-fmt-config",
+        "$(source starlark-fmt.json)",
+        "--ruff",
+        "$(location_exec :ruff)",
+    ],
+    exe = ":dev",
+)
+
+command_alias(
+    name = "ty-config",
+    args = ["ty-config"],
+    exe = ":dev",
+    visibility = ["PUBLIC"],
+)
+
+command_alias(
+    name = "ty-editor",
+    args = [
+        "ty",
+        "--python",
+        "$(location_exec :python3)",
+        "--ty",
+        "$(location_exec :ty)",
+    ],
+    exe = ":dev",
+)
+
+# The catalog tool resolves the default catalog package and project root itself.
+command_alias(
+    name = "refresh-catalog",
+    exe = ":catalog",
+)
+
+command_alias(
+    name = "verify-catalog",
+    args = ["--verify"],
+    exe = ":catalog",
+)

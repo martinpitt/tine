@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""An image carrying a Go program built from source.
+
+In a product this package lives in the OS.git that vendors tine, beside a checkout of each project
+it builds. `hello/` plays that checkout.
+"""
+
+load("@tine//box:defs.bzl", "box")
+load("@tine//git:defs.bzl", "git")
+load("@tine//go:defs.bzl", "go")
+load("@tine//image:defs.bzl", "image")
+load("@tine//package:defs.bzl", "package")
+
+# The build environment for our Go projects; it never reaches an image.
+box.new(
+    name = "go.box",
+    packages = [
+        # TLS trust for the module fetch from proxy.golang.org.
+        "ca-certificates",
+        "golang",
+    ],
+    release = "tine//catalog:fedora.rawhide.release",
+)
+
+# A checked-out project needs no build file of its own: the sources default to the directory named
+# after the target, and the go.mod in them marks the module root.
+go.package(
+    name = "hello",
+    box = ":go.box",
+    packages = {"hello-cli": "./cmd/hello-cli"},
+)
+
+# A project with no dependencies at all, which therefore commits no go.sum and fetches nothing.
+# Without `packages`, the module's only main package is built under the target's name.
+go.package(
+    name = "nodeps",
+    box = ":go.box",
+)
+
+# The local checkout must override this fetch, so its revision is deliberately a placeholder.
+git.fetch(
+    name = "nodeps.git",
+    repo = "https://github.com/example/nodeps",
+    rev = "1111111111111111111111111111111111111111",
+)
+
+go.package(
+    name = "renamed",
+    box = ":go.box",
+    src = ":nodeps.git",
+)
+
+go.package(
+    name = "multiple",
+    box = ":go.box",
+    # Force the persistent-cache path for this test; real projects select dev mode with tine mount.
+    dev = True,
+    packages = {
+        "first": ".",
+        "second": "example.com/nodeps",
+    },
+    src = "nodeps",
+)
+
+box.sh_test(
+    name = "packages-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    script = 'for binary in "$@"; do [[ "$("$binary")" == "no dependencies here" ]]; done',
+    # $(exe) goes through RunInfo: a single binary is run as the target, any binary as its sub-target.
+    args = [
+        "$(exe :nodeps)",
+        "$(exe :renamed)",
+        "$(exe :multiple[first])",
+        "$(exe :multiple[second])",
+    ],
+)
+
+package.manager(
+    name = "image.package-manager",
+    base = "tine//catalog:fedora.rawhide.package-manager",
+)
+
+# `:demo[sbom][cyclonedx]` lists the Go modules each binary was built from, next to the image's
+# packages.
+image.rootfs_archive(
+    name = "demo",
+    package_manager = ":image.package-manager",
+    # No runtime packages needed: neither project imports anything that pulls in cgo, so both
+    # binaries are static. The filesystem skeleton still comes from its package, giving the
+    # copies below their place to land.
+    packages = ["filesystem"],
+    ops = [
+        image.copy(":hello[hello-cli]", "/usr/bin/hello-cli"),
+        image.copy(":nodeps[nodeps]", "/usr/bin/nodeps"),
+    ],
+    format = "tar",
+)
+
+# The modules go embeds in the binary must reach the image's SBOM. Our own are unversioned:
+# -buildvcs=false leaves a main module's version at (devel).
+box.sh_test(
+    name = "sbom-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    test = "@tine//tests:contains.sh",
+    args = [
+        "$(location :demo[sbom][cyclonedx])",
+        "pkg:golang/example.com/hello",
+        "pkg:golang/example.com/nodeps",
+        "pkg:golang/rsc.io/quote@",
+        "pkg:golang/golang.org/x/text@",
+    ],
+)

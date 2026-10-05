@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""RPM package-build examples and their end-to-end assertions."""
+
+load("@tine//box:defs.bzl", "box")
+load("@tine//git:defs.bzl", "git")
+load("@tine//package_system/rpm:defs.bzl", "rpm")
+
+_BUILDROOT = "tine//catalog:fedora.rawhide.buildroot"
+
+git.checkout(name = "hello.source")
+
+# The archive path runs %prep and emits both binary and source RPMs. It exists separately from the
+# source-tree fixture to check release and dev compression through real RPM headers.
+rpm.package(
+    name = "hello-archive",
+    package = "hello",
+    spec = "hello/hello.spec",
+    buildroot = _BUILDROOT,
+    release = "1",
+    source_date_epoch = 1754006400,
+    subpackages = ["hello"],
+)
+
+box.sh_test(
+    name = "hello-archive-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    script = 'python3 "$@"',
+    args = ["$(source hello_archive_check.py)", "$(location :hello-archive)"],
+)
+
+# The explicit override keeps this source-tree fixture in dev mode without depending on the
+# user's root config.
+rpm.package(
+    name = "hello-dev",
+    package = "hello",
+    spec = "hello/hello.spec",
+    buildroot = _BUILDROOT,
+    build_requires = ["gcc"],
+    dev = True,
+    in_place_spec = "rpm/hello.spec",
+    release = "1",
+    source_date_epoch = 1754006400,
+    source_tree = ":hello.source",
+    subpackages = ["hello"],
+)
+
+box.sh_test(
+    name = "hello-dev-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    script = 'python3 "$@"',
+    args = [
+        "$(source hello_dev_check.py)",
+        "$(location :hello-dev)",
+    ],
+)
+
+# The same checkout built for release from an in-tree dist-git rather than in dev mode.
+# This is the only one that gets into the shared cache.
+rpm.package(
+    name = "hello-tree",
+    package = "hello",
+    spec = "hello/hello.spec",
+    buildroot = _BUILDROOT,
+    build_requires = ["gcc"],
+    in_place_spec = "rpm/hello.spec",
+    release = "1",
+    source_date_epoch = 1754006400,
+    source_tree = ":hello.source",
+    subpackages = ["hello"],
+)
+
+box.sh_test(
+    name = "hello-tree-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    script = 'python3 "$@"',
+    args = [
+        "$(source hello_tree_check.py)",
+        "$(location :hello-tree)",
+    ],
+)

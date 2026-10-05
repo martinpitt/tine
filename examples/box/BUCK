@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""Development-box smoke target."""
+
+load("@tine//box:defs.bzl", "box")
+
+box.new(
+    name = "demo.box",
+    packages = [
+        "bash",
+        "coreutils",
+        "fish",
+    ],
+    release = "tine//catalog:fedora.rawhide.release",
+)

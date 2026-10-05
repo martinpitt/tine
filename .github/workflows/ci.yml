@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # a run on main records whether that commit is green, so let it finish even after the next merge
+  # has landed
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    strategy:
+      # One architecture failing says nothing about the other, and which of the two broke is the
+      # first thing worth knowing.
+      fail-fast: false
+      matrix:
+        # architecture is tine's name for it, as in platforms/architecture.bzl
+        include:
+          - runner: ubuntu-24.04
+            architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    # the check names that a matrix of runners alone gave
+    name: build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/gh-runner-setup
+
+      # the actual pipeline (bootstrap, linters, catalog, image builds, and VM boot smokes)
+      # emits a log group per step
+      - name: CI
+        run: tools/ci.sh
+
+      # If examples/image:reproducibility-test fails, for easy pickup
+      - name: Upload actual reproducibility digests
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reproducibility-${{ matrix.architecture }}
+          path: examples/image/actual.*.json
+          if-no-files-found: ignore

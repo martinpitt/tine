@@ -1,0 +1,315 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""Bootable image signed for Secure Boot.
+
+Without configuration, the signing keys are generated at build time and live only in buck-out, so
+nothing secret is committed. Configure a section per key and the same image signs through PKCS#11
+tokens instead; see docs/user/signing-pkcs11.md. Real OS images should follow this shape: one definition
+serves both, and nothing downstream of the keys knows which it got, since every key publishes its
+certificate whether it is held in the graph or by a token.
+
+The signed demo-ext system extension shows verity signing for a sysext DDI, with the image
+enforcing the signature through its sysext.conf image policy.
+"""
+
+load("@tine//box:defs.bzl", "box")
+load("@tine//image:defs.bzl", "image")
+load("@tine//package:defs.bzl", "package")
+load("@tine//platforms:architecture.bzl", "ARCHITECTURES", "architecture")
+load("@tine//tests:defs.bzl", "tests")
+
+package.manager(
+    name = "image.package-manager",
+    base = "tine//catalog:fedora.rawhide.package-manager",
+)
+
+# This example serves two audiences, so it declares a key for each and picks: the tokens
+# `-c secure-boot-signing.{token,pin-file,socket}` configures, or pairs generated into buck-out for
+# anyone building it without a token to hand. A real image signing through a token declares the token
+# key alone, so that a configuration file that fails to arrive fails the build rather than shipping an
+# image signed out of buck-out.
+SIGN_WITH_TOKEN = read_config("secure-boot-signing", "token") != None
+
+image.pkcs11_signing_key(
+    name = "signing.token",
+    section = "secure-boot-signing",
+)
+
+# A second key, so that a compromised expected-PCR policy key cannot also sign boot binaries. Its own
+# token, hence a section of its own.
+image.pkcs11_signing_key(
+    name = "pcr-signing.token",
+    section = "pcr-signing",
+)
+
+# "signing" rather than "verity" or "secure-boot", as this key signs both.
+image.generate_signing_key(name = "signing")
+
+image.generate_signing_key(name = "pcr-signing")
+
+# The two certificates this image reads back must say which key they belong to, and neither may fall
+# back to ukify's own name for a Secure Boot key.
+[
+    box.sh_test(
+        name = "generated-key-name-test." + name,
+        args = ["$(location :{}[cert])".format(name), "tine.generated." + name],
+        box = "@tine//tools:dev.box",
+        script = """
+subject=$(openssl x509 -noout -subject -in "$1")
+if ! echo "$subject" | grep -qF "CN=$2"; then
+    echo "ERROR: $1 is named $subject, expected CN=$2" >&2
+    exit 1
+fi
+""",
+    )
+    for name in ["signing", "pcr-signing"]
+]
+
+_SIGNING = ":signing.token" if SIGN_WITH_TOKEN else ":signing"
+
+_PCR_SIGNING = ":pcr-signing.token" if SIGN_WITH_TOKEN else ":pcr-signing"
+
+# Declaring the initrd instead of letting the disk image declare one is what makes it configurable:
+# its packages, its operations, and how the cpio the UKI carries is compressed.
+image.initrd(
+    name = "image.initrd",
+    package_manager = ":image.package-manager",
+    compression = "none",
+)
+
+image.bootable_disk(
+    name = "image",
+    package_manager = ":image.package-manager",
+    initrd = ":image.initrd",
+    definitions = image.DEFAULT_SIGNED_USR_VERITY_PARTITIONS,
+    packages = [
+        "kernel-core",
+        "systemd",
+        "systemd-udev",
+        "systemd-boot-unsigned",
+        "fedora-release",
+        "bash",
+        "coreutils",
+        "util-linux",
+        "dbus-broker",
+    ],
+    ops = [
+        # The smoke test compares this against the public key the stub hands the booted system, to
+        # tell which key sealed the expected-PCR policy. Sealed under verity, so it cannot be
+        # swapped.
+        image.copy(_SIGNING + "[cert]", "/usr/share/tine-example/secure-boot.crt"),
+        image.copy(_PCR_SIGNING + "[cert]", "/usr/share/tine-example/expected-pcr.crt"),
+        # demo-ext's signature verifies against this certificate; the sysext.conf policy next to
+        # it makes that verification a requirement rather than opportunistic.
+        image.copy(_SIGNING + "[cert]", "/usr/lib/verity.d/demo-ext.crt"),
+        image.copy("sysext.conf", "/usr/lib/systemd/sysext.conf"),
+        # Plain data for the boot smoke's negative proof: a DDI the policy must refuse.
+        image.copy(":demo-ext-unsigned", "/usr/share/tine-example/demo-ext-unsigned.raw"),
+    ],
+    # An ESP-only path makes deferred metadata cross root, identity, and ESP before repart applies it.
+    tmpfiles = ["d /boot/tine-tmpfiles 0700 - -"],
+    # This key signs the UKIs and systemd-boot, puts auto-enrollment files onto the ESP, and signs
+    # the verity root hash. For a key that caches across workspaces, see image.pem_signing_key() under
+    # "Secure Boot signing" in images.md.
+    # `compression = "zstd"` on the partition only picks the algorithm; these are what actually make
+    # the erofs small, and they are the same options image_sysext builds a DDI with. --invariant keeps
+    # the ESP byte-stable, which mkfs.fat is not by default.
+    mkfs_options = {
+        "erofs": [
+            "-zzstd,level=3",
+            "-C524288",
+            "-Efragments,ztailpacking,dedupe",
+        ],
+        "vfat": ["--invariant"],
+    },
+    secure_boot_key = _SIGNING,
+    # A signed /usr is read-only and carries no package manager, so the database in it would only be
+    # weight under verity. `:image[pkgdb]` still captures it from the image itself.
+    strip_pkgdb = True,
+    verity_key = _SIGNING,
+    sign_expected_pcr_key = _PCR_SIGNING,
+)
+
+# System-extension DDI extending :image, signed so the strict policy in sysext.conf accepts the
+# merge. The image's own key, whose certificate it carries in /usr/lib/verity.d.
+image.sysext_image(
+    name = "demo-ext",
+    base = ":image",
+    packages = ["zsh"],
+    install_docs = False,
+    verity_key = _SIGNING,
+)
+
+# Everything a release of this example publishes, gathered under the names it publishes them
+# under: the disk and its qcow2 encoding, the UKI, the kernel and initrd a direct kernel boot
+# needs, the signed extension, the /usr partitions an update transfers, and the SBOMs and
+# package database. Each name comes from the target that built the artifact, so nothing here
+# decides what anything is called.
+image.artifacts(
+    name = "release",
+    targets = [
+        ":demo-ext",
+        ":demo-ext[sbom]",
+        ":image",
+        ":image[initrd][sbom]",
+        ":image[pkgdb]",
+        ":image[qcow2]",
+        ":image[sbom]",
+    ],
+)
+
+# What the policy protects against: the same extension shape without a signature. Standalone
+# (extension-release ID=_any) rather than based on :image, which carries this DDI as smoke test
+# data and may not depend on it circularly. Refusal happens at dissection, before content
+# matters; the marker is for the smoke test's permissive counter-check.
+image.sysext_image(
+    name = "demo-ext-unsigned",
+    package_manager = ":image.package-manager",
+    ops = [image.mkdir("/usr/share/tine-unsigned")],
+    install_docs = False,
+)
+
+image.vm(
+    name = "vm",
+    autologin = "root",
+    credentials = {
+        "firstboot.locale": "C.UTF-8",
+        "firstboot.timezone": "UTC",
+    },
+    box = "tine//catalog:fedora.rawhide.box",
+    image = ":image",
+    # select setup-mode firmware, so sd-boot enrolls the keys from the ESP on first
+    # boot; VM then enforces Secure Boot.
+    secure_boot = True,
+    sysexts = [":demo-ext"],
+)
+
+# Boot smoke test: enrolls keys on first boot, settles under Secure Boot with a vTPM, then powers
+# off. Reuses the shared tine driver; `buck test` runs it, `buck run` boots it by hand.
+tests.vm_smoke(
+    name = "vm-smoke",
+    vm = ":vm",
+    checks = [
+        "bootctl | grep -F 'Secure Boot: enabled (user)'",
+        "bootctl | grep -F 'Measured UKI: yes'",
+        "bootctl | grep -F 'Measured OS: yes'",
+        # The booted /usr must carry the signed bootloader: bootctl update (and thus
+        # systemd-boot-update.service after an OS update) reinstalls from there, and an unsigned
+        # binary would fail Secure Boot verification on the next reboot.
+        "test -e /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed",
+        # `strip_pkgdb` leaves the package database out of the partitions, so nothing under the
+        # signed /usr carries one; the path is the rpm package system's `database_paths`.
+        "test ! -e /usr/lib/sysimage/rpm",
+        # The disk carries the signature over the verity root hash, which is what lets anything
+        # receiving this image as an update verify it before trusting it.
+        "test -e /dev/disk/by-designator/usr-verity-sig",
+        # The stub hands the booted system the public key the expected-PCR policy is sealed with.
+        "test -s /run/systemd/tpm2-pcr-public-key.pem",
+        # The extension merged with sysext.conf's strict "signed" image policy. Proves
+        # its signature verified against the certificate in /usr/lib/verity.d.
+        "systemd-sysext status --no-pager | grep -F demo-ext",
+        "test -x /usr/bin/zsh",
+        # The same policy refuses an extension without a signature: refresh fails, and must
+        # change nothing -- the unsigned extension appears neither in the list nor in the
+        # merged file system, and the previous merge stays in place (the dissection failure
+        # precedes the unmerge).
+        "mkdir -p /run/extensions && cp /usr/share/tine-example/demo-ext-unsigned.raw /run/extensions/",
+        "! systemd-sysext refresh",
+        "! systemd-sysext status --no-pager | grep -F demo-ext-unsigned",
+        "test ! -d /usr/share/tine-unsigned && test -x /usr/bin/zsh",
+        # ...and only with a relaxed policy the same DDI merges fine.
+        "systemd-sysext refresh '--image-policy=root=verity+signed+unprotected+absent:usr=verity+signed+unprotected+absent:=ignore'",
+        "systemd-sysext status --no-pager | grep -F demo-ext-unsigned && test -d /usr/share/tine-unsigned",
+        # Undo the relaxed merge: without the unsigned DDI the strict refresh succeeds again,
+        # demo-ext stays, and the unsigned marker vanishes.
+        "rm /run/extensions/demo-ext-unsigned.raw && systemd-sysext refresh && test -x /usr/bin/zsh && test ! -d /usr/share/tine-unsigned",
+        # It must be the expected-PCR key, and not the Secure Boot one, compared through the
+        # certificates copied into /usr. Derive each in the guest and insist it is non-empty, so
+        # that a comparison against nothing cannot pass.
+        '/usr/lib/systemd/systemd-keyutil extract-public --certificate /usr/share/tine-example/expected-pcr.crt >/tmp/pcr.pem && test -s /tmp/pcr.pem && test "$(cat /tmp/pcr.pem)" = "$(cat /run/systemd/tpm2-pcr-public-key.pem)"',
+        '/usr/lib/systemd/systemd-keyutil extract-public --certificate /usr/share/tine-example/secure-boot.crt >/tmp/sb.pem && test -s /tmp/sb.pem && test "$(cat /tmp/sb.pem)" \'!=\' "$(cat /run/systemd/tpm2-pcr-public-key.pem)"',
+    ],
+)
+
+# This image strips the package database from its partitions, so only the logical image still
+# carries one for syft to read. Without it syft falls back to what it can guess from binaries,
+# which reports a fraction of the packages: the last two have no binary to guess from.
+box.sh_test(
+    name = "sbom-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    test = "@tine//tests:contains.sh",
+    args = [
+        "$(location :image[sbom][cyclonedx])",
+        "pkg:rpm/fedora/systemd@",
+        "pkg:rpm/fedora/kernel-core@",
+        "pkg:rpm/fedora/fedora-release@",
+        "pkg:rpm/fedora/filesystem@",
+    ],
+)
+
+box.sh_test(
+    name = "release-artifacts-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    test = "release-artifacts.sh",
+    args = ["$(location :release)", "$(location :image[roothash])"]
+    + architecture.select({name: [spellings.systemd] for name, spellings in ARCHITECTURES.items()}),
+)
+
+# The disk's own listing is the union of its partitions': what an installation of it leaves behind,
+# whichever partition each path arrives on.
+box.sh_test(
+    name = "disk-manifest-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    test = "@tine//tests:contains.sh",
+    args = [
+        "$(location :image[disk-manifest])",
+        '"name":"usr/bin/bash"',
+        '"name":"boot/tine-tmpfiles","type":"dir","mode":448',
+        '"name":"boot/EFI/Linux',
+    ],
+)
+
+# The kernel install hook is bypassed, it didn't generate its own initrd.
+# Also no module symbol table copy.
+box.sh_test(
+    name = "esp-kernel-leftovers-test",
+    labels = ["image"],
+    args = ["$(location :image[manifests][esp])"],
+    box = "@tine//tools:dev.box",
+    script = """
+if grep -o '"name":"boot/\\(initramfs\\|symvers\\)[^"]*"' "$1"; then
+    echo "ERROR: a kernel package's leftovers reached the ESP" >&2
+    exit 1
+fi
+""",
+)
+
+box.sh_test(
+    name = "extension-manifest-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    test = "extension-manifest.sh",
+    args = ["$(location :demo-ext[ddi-manifest])"],
+)
+
+# Each listing covers what its own artifact carries: a DDI holds the two merged hierarchies, and a
+# partition holds what its definition copies, which is why the image's /var is in no listing at all.
+[
+    box.sh_test(
+        name = "manifest-scope-test." + name,
+        labels = ["image"],
+        box = "@tine//tools:dev.box",
+        test = "@tine//tests:manifest-scope.sh",
+        args = [target] + hierarchies,
+    )
+    for name, target, hierarchies in [
+        ("ddi", "$(location :demo-ext[ddi-manifest])", ["usr", "opt"]),
+        ("disk", "$(location :image[disk-manifest])", ["boot", "efi", "usr"]),
+        ("esp", "$(location :image[manifests][esp])", ["boot", "efi"]),
+        ("usr", "$(location :image[manifests][usr])", ["usr"]),
+    ]
+]

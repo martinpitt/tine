@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+name: GitHub runner setup
+description: Prepare a GitHub-hosted Ubuntu runner for a build, here or in a project consuming this cell.
+
+runs:
+  using: composite
+  steps:
+    # Freeing up disk space with rm -rf can take multiple minutes. Since we don't need the extra
+    # free space immediately, we remove the files in the background. However, we first move them to
+    # a different location so that nothing tries to use anything in these directories anymore while
+    # we're busy deleting them.
+    - name: Free disk space
+      shell: bash
+      run: |
+        sudo mv /usr/local /usr/local.trash
+        sudo mv /opt/hostedtoolcache /opt/hostedtoolcache.trash
+        sudo systemd-run rm -rf /usr/local.trash /opt/hostedtoolcache.trash
+
+    # buck's sandbox needs unprivileged user namespaces (unshare(CLONE_NEWUSER)); Ubuntu
+    # restricts them via AppArmor, so lift the restriction.
+    - name: Allow unprivileged user namespaces
+      shell: bash
+      run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+    # GitHub's arm64 runners have no KVM; the pipeline skips the VM boot smokes where it is missing.
+    # Enforce /dev/kvm for x86_64, to ensure we don't silently skip the VM tests everywhere.
+    - name: Set up /dev/kvm
+      if: runner.arch == 'X64'
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm --settle
+        ls -l /dev/kvm
+
+    - name: Permit unprivileged access to vhost-vsock
+      shell: bash
+      run: |
+        sudo modprobe vhost_vsock
+        sudo chmod 0666 /dev/vhost-vsock

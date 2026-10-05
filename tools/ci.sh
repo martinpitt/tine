@@ -1,0 +1,207 @@
+#!/bin/bash
+
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+# The full CI pipeline. Arguments select groups, e.g. `tools/ci.sh check build`
+set -Eeuo pipefail
+cd "$(dirname "$0")/.."
+buck=(bin/tine buck)
+only_groups=("$@")
+
+# GitHub folds each group into a log group; an interactive terminal gets a bold banner; anything else
+# (piped to a file, another CI) gets a bare `=== label ===` line with no escape sequences.
+if [ "${GITHUB_ACTIONS:-}" = true ]; then mode=github
+elif [ -t 1 ]; then
+    mode=tty
+    bold=$'\033[1m'
+    dim=$'\033[2m'
+    reset=$'\033[0m'
+    # The rule's accent is an ANSI palette colour (not a fixed RGB), so the terminal keeps it legible
+    # on its own light/dark theme. Not bold: that renders bright and washes out on light backgrounds.
+    accent=''
+    [ -z "${NO_COLOR:-}" ] && accent=$'\033[36m'
+else mode=plain
+fi
+
+# Space left on the filesystem holding buck-out
+free_space() {
+    df -h --output=avail . | awk 'NR == 2 { print $1 }'
+}
+
+# A full-width ━ rule in the accent colour.
+hrule() {
+    local width fill
+    width=$(tput cols 2>/dev/null || echo 72)
+    printf -v fill '%*s' "$width" ''
+    printf '%s%s%s\n' "$accent" "${fill// /━}" "$reset"
+}
+
+# A group banner: blank line; a rule opening `━━━ label ` with the label default-fg bold and the dashes
+# accented; the dim command for copy-paste; then a closing rule.
+banner() {
+    local label=$1 width tail used
+    shift
+    width=$(tput cols 2>/dev/null || echo 72)
+    used=$((4 + ${#label} + 1))  # "━━━ " + label + trailing space
+    printf -v tail '%*s' "$((width > used ? width - used : 0))" ''
+    printf '\n%s━━━ %s%s%s %s%s%s\n' "$accent" "$reset$bold" "$label" "$reset" "$accent" "${tail// /━}" "$reset"
+    printf '%s%s%s\n' "$dim" "$*" "$reset"
+    hrule
+}
+
+# group LABEL -- CMD...: run one labelled group, fail-fast.
+#
+# Never test the group's status (`"$@" || rc=$?`): bash then ignores errexit for it, and for every
+# function it calls, so a group would run on past its own first failure and report the status of
+# whatever ran last. The GitHub failure path goes through the ERR trap below instead, and `groupname` is
+# global for the trap to name.
+group() {
+    groupname=$1
+    shift 2
+    # With group names as arguments, everything else is skipped.
+    if [ "${#only_groups[@]}" -gt 0 ]; then
+        case " ${only_groups[*]} " in
+            *" $groupname "*) ;;
+            *) return 0 ;;
+        esac
+    fi
+    case $mode in
+        # in the label rather than the group's own output, so that we see it in the collapsed GitHub log
+        github) printf '::group::%s (%s free)\n' "$groupname" "$(free_space)" ;;
+        tty) banner "$groupname" "$@" ;;
+        plain) printf '\n=== %s ===\n' "$groupname" ;;
+    esac
+    "$@"
+    if [ "$mode" = github ]; then printf '::endgroup::\n'; fi
+}
+
+# On GitHub, close the group and surface an ::error:: after it (a failure buried inside a collapsed
+# group is invisible). errtrace (-E above) carries this into the functions groups run.
+if [ "$mode" = github ]; then
+    trap 'printf "::endgroup::\n::error::ci group %s failed\n" "$groupname"' ERR
+fi
+
+# The catalog pins Arch repositories for x86_64 only. On another architecture, the Arch root box
+# cannot be built and the catalog cannot be verified.
+x86_only_catalog() { [ "$(uname -m)" = x86_64 ]; }
+
+# All available build targets; see tools/dev.py for why that is not always `tine//...`.
+universe() { "${buck[@]}" run tine//tools:dev -- universe; }
+
+# `build` and `test` take no query, so they get the universe target list explicitly.
+whole_cell() {
+    local verb=$1 query listing targets
+    shift
+    query=$(universe)
+    listing=$("${buck[@]}" uquery "$query")
+    mapfile -t targets <<< "$listing"
+    # There are a lot of targets which are incompatible everywhere (image base without a chosen distribution, a
+    # signing token without config, etc.), don't fail on them.
+    "${buck[@]}" "$verb" --skip-incompatible-targets "${targets[@]}" "$@"
+}
+
+# The boot smokes need the host's KVM. Some CI envs (like GitHub's arm64 runners) don't have that.
+have_kvm() { [ -e /dev/kvm ]; }
+vm_filter=()
+if ! have_kvm; then
+    # A smoke test contains `image` too, and a matching `--include` wins without `--always-exclude`.
+    vm_filter=(--exclude vm --always-exclude)
+    if [ "$mode" = github ]; then printf '::warning::'; fi
+    printf 'no /dev/kvm: skipping the VM boot smokes\n'
+fi
+
+# Sign the Secure Boot example through PKCS#11 tokens, exercising the external-key path end to end
+# with the production module: tools/signing-server serves one tpm2-pkcs11 token per key from a
+# software TPM, and the same example builds against its socket. Every tool this needs comes from the
+# swtpm-signing box, so a runner needs nothing beyond what the rest of the pipeline uses. The
+# externally signed image must also boot, which reuses the vm-smoke checks in full: the image carries
+# the token's certificates the same way a generated key's, so the checks reading them apply here too.
+# Stopping the arrangement is one TERM, per tools/signing-server. The log surfaces only on failure;
+# the daemons keep spamming it during the build (swtpm logs every client disconnect), so it stays
+# out of the console on success.
+pkcs11_cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ -e "$pkcs11_dir/log" ]; then cat "$pkcs11_dir/log" >&2; fi
+    # Already gone when the server itself failed, which the socket wait below then reports.
+    if kill -0 "$server_pid" 2> /dev/null; then kill "$server_pid"; fi
+    rm -rf "$pkcs11_dir"
+}
+
+secureboot_pkcs11() {
+    # On a fresh runner this resolves and installs the signing box, so run it in the foreground
+    # where that shows progress, rather than sitting silently in the backgrounded server's log.
+    "${buck[@]}" build tine//tools:swtpm-signing.box
+
+    pkcs11_dir=$(mktemp -d)
+    "${buck[@]}" run tine//tools:signing-server -- "$pkcs11_dir" > "$pkcs11_dir/log" 2>&1 &
+    server_pid=$!
+    trap pkcs11_cleanup EXIT
+    until [ -S "$pkcs11_dir/sock/pkcs11" ]; do
+        # Any setup failure exits the server before it gets to listen; its log then says why.
+        kill -0 "$server_pid" 2> /dev/null || return 1
+        sleep 0.5
+    done
+
+    # A prod build host materializes the signing coordinates in a file and points the build at it
+    cat > "$pkcs11_dir/signing.bcfg" <<EOF
+[secure-boot-signing]
+token = SecureBoot
+pin-file = $pkcs11_dir/pin
+socket = $pkcs11_dir/sock/pkcs11
+
+[pcr-signing]
+token = PcrPolicy
+pin-file = $pkcs11_dir/pin
+socket = $pkcs11_dir/sock/pkcs11
+EOF
+    local config=(--config-file "$pkcs11_dir/signing.bcfg")
+
+    "${buck[@]}" build "${config[@]}" tine//examples/image-secureboot:image
+    "${buck[@]}" build "${config[@]}" 'tine//examples/image-secureboot:image[uki]' --out "$pkcs11_dir/ukis"
+
+    # The public key the UKI hands the booted system must be the PcrPolicy token's, and not the
+    # Secure Boot one. Read each side into a variable first: a command substitution inside a `test`
+    # argument is exempt from errexit, so a certificate that cannot be read would yield an empty
+    # string and satisfy the inequality below without comparing anything.
+    local box=("${buck[@]}" run tine//tools:swtpm-signing.box --) uki=("$pkcs11_dir"/ukis/*.efi)
+    local pcrpkey pcr_certificate secure_boot_certificate
+    # ukify takes the file before the options, per `ukify inspect --help`.
+    "${box[@]}" ukify inspect "${uki[0]}" --section ".pcrpkey:binary@$pkcs11_dir/pcrpkey"
+    pcrpkey=$("${box[@]}" openssl pkey -pubin -in "$pkcs11_dir/pcrpkey" -pubout)
+    pcr_certificate=$("${box[@]}" openssl x509 -in "$pkcs11_dir/PcrPolicy.crt" -pubkey -noout)
+    secure_boot_certificate=$("${box[@]}" openssl x509 -in "$pkcs11_dir/SecureBoot.crt" -pubkey -noout)
+    test "$pcrpkey" = "$pcr_certificate"
+    test "$pcrpkey" != "$secure_boot_certificate"
+
+    if have_kvm; then "${buck[@]}" run "${config[@]}" tine//examples/image-secureboot:vm-smoke; fi
+}
+
+# Nothing here needs a box, so a graph that does not analyze is reported in seconds rather than
+# after two bootstraps. `check` runs it again, for anyone running that on its own.
+group graph             -- "${buck[@]}" bxl tine//tools/graph.bxl:analyze -- --pattern "$(universe)"
+# First invocation fetches buck's pinned tools and builds the shared box; kept its own group so
+# bootstrap time stays visible.
+group box               -- "${buck[@]}" build tine//catalog:fedora.rawhide.box
+# The Arch box and the Debian box are root boxes, so each box is bootstrapped from scratch and
+# gets its own group.
+if x86_only_catalog; then
+    group arch-box      -- "${buck[@]}" build tine//catalog:arch.rolling.box
+fi
+group deb-box           -- "${buck[@]}" build tine//catalog:debian.testing.box
+group check             -- "${buck[@]}" run tine//tools:check
+# Every repository the catalog declares is pinned to a mirror serving immutable snapshots, so the whole
+# catalog is verifiable rather than the boxes that happen to be pinned.
+if x86_only_catalog; then
+    group verify-catalog -- "${buck[@]}" run tine//tools:verify-catalog
+fi
+# Everything the cell declares, rather than the handful of targets someone remembered to name here:
+# every example image over every package system, the boxes, and the source-build demos.
+group build             -- whole_cell build
+# Everything `check` left out: the boot smokes over every package system, which take minutes each,
+# and the assertions about what the images above produced. Adding one is declaring it, not naming it
+# here as well.
+group image-tests       -- whole_cell test --include image "${vm_filter[@]}"
+group secureboot-pkcs11 -- secureboot_pkcs11
+# The shared cache with a real Buck on both ends; in its own isolation dir.
+group remote-cache      -- "${buck[@]}" run tine//tests:cache-roundtrip

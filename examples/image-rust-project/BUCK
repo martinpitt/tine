@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+"""An image carrying a Rust program built from source.
+
+In a product this package lives in the OS.git that vendors tine, beside a checkout of each project
+it builds. `hello/` plays that checkout.
+"""
+
+load("@tine//box:defs.bzl", "box")
+load("@tine//cargo:defs.bzl", "cargo")
+load("@tine//git:defs.bzl", "git")
+load("@tine//image:defs.bzl", "image")
+load("@tine//package:defs.bzl", "package")
+
+# The build environment for our Rust projects; it never reaches an image.
+box.new(
+    name = "rust.box",
+    packages = [
+        "cargo",
+        "gcc",
+        "rust",
+    ],
+    release = "tine//catalog:fedora.rawhide.release",
+)
+
+# Products use git.fetch() for projects they build but do not vendor. This example's `hello/` directory
+# overrides the fetch, avoiding network access during the test. Both paths give cargo.package() the same
+# opaque directory artifact and exercise its workspace discovery.
+git.fetch(
+    name = "hello.git",
+    repo = "https://github.com/example/hello",
+    rev = "1c9e0f4b0f7d2a5e8b3c6d1a4f7b2e5c8d0a3f6b",
+)
+
+# A fetched project needs no build file of its own. Its Cargo.lock both pins the crates and marks the
+# workspace root, even though neither it nor Cargo.toml is visible until the checkout action runs.
+cargo.package(
+    name = "hello",
+    binaries = ["hello-cli"],
+    box = ":rust.box",
+    srcs = [":hello.git"],
+)
+
+# A project with no dependencies at all, which therefore commits no Cargo.lock.
+cargo.package(
+    name = "nodeps",
+    binaries = ["nodeps"],
+    box = ":rust.box",
+)
+
+box.sh_test(
+    name = "packages-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    script = 'for binary in "$@"; do [[ "$("$binary")" == "nothing to resolve" ]]; done',
+    # $(exe) goes through RunInfo: a single binary is run as the target, any binary as its sub-target.
+    args = [
+        "$(exe :nodeps)",
+        "$(exe :nodeps[nodeps])",
+    ],
+)
+
+# How these binaries install, declared beside the projects rather than repeated by every image that
+# installs them. Any image operation may be attached, not only copies.
+image.install(
+    name = "demo.install",
+    # The target declares what it needs, so no image installing it has to know. Rust links
+    # against glibc.
+    packages = ["glibc"],
+    ops = [
+        image.copy(":hello[hello-cli]", "/usr/bin/hello-cli"),
+        image.copy(":nodeps[nodeps]", "/usr/bin/nodeps"),
+        image.mkdir("/usr/share/hello"),
+    ],
+)
+
+package.manager(
+    name = "image.package-manager",
+    base = "tine//catalog:fedora.rawhide.package-manager",
+)
+
+# `:demo[sbom][cyclonedx]` reports the crates the binary was built from, next to the image's packages.
+image.rootfs_archive(
+    name = "demo",
+    package_manager = ":image.package-manager",
+    ops = [image.install_from(":demo.install")],
+    format = "tar",
+)
+
+# The crate graph cargo-auditable recorded in each binary must reach the image's SBOM: our own
+# packages, a crates.io dependency, and one from git.
+box.sh_test(
+    name = "sbom-test",
+    labels = ["image"],
+    box = "@tine//tools:dev.box",
+    test = "@tine//tests:contains.sh",
+    args = [
+        "$(location :demo[sbom][cyclonedx])",
+        "pkg:cargo/hello@0.1.0",
+        "pkg:cargo/nodeps@0.1.0",
+        "pkg:cargo/serde_json@",
+        "pkg:cargo/anyhow@",
+    ],
+)

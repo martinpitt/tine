@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
+# SPDX-License-Identifier: MPL-2.0
+
+# Tooling for the in-tree Python drivers.
+
+target-version = "py314"
+line-length = 109
+extend-exclude = ["buck-out"]
+# A command carries no suffix for the linters to recognize it by.
+extend-include = ["bin/tine"]
+# tine runs before anything is fetched, so pyupgrade must stay within the host-python floor.
+per-file-target-version = { "bin/tine" = "py312", "bin/tine.py" = "py312", "bin/cache_shim.py" = "py312" }
+src = [
+    "archive",
+    "cargo",
+    "box",
+    "image",
+    "image_format",
+    "package",
+    "package_system/pacman",
+    "package_system/rpm",
+    "remote_cache",
+    "rootfs",
+]
+lint.select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle (trailing whitespace)
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "ANN",  # flake8-annotations
+]
+
+lint.per-file-ignores = {
+    # protobuf messages hex strings cannot be wrapped
+    "remote_cache/reapi_test.py" = ["E501"],
+}
