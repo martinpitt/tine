@@ -10,6 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   issues: write
   pull-requests: write
@@ -33,6 +34,6 @@ jobs:
           python3 tools/bot_pr.py --name bump \
               --label-description 'automatic version bumps' \
               --command 'bin/tine buck run tine//tools:bump -- --all --commit' \
-              --test tools/ci.sh \
+              --ci ci.yml \
               --repo '${{ github.repository }}' \
               --token '${{ github.token }}'
