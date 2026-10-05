@@ -11,7 +11,8 @@ label is open, this does nothing.
  - Otherwise, open a regular PR and exit zero.
 
 This is usually being called with the default GITHUB_TOKEN, which will not trigger further actions, in
-particular tests. They need to be approved manually by a reviewer.
+particular tests. So it pushes with the deploy key the checkout set up (see tools/setup_deploy_key.py),
+and pushes the branch once more after opening the pull request, to start its CI.
 
 Everything a workflow decides is an option, so that `--help` is the whole contract. The rest comes from
 what Actions sets around the run: GITHUB_SERVER_URL and GITHUB_RUN_ID to link back to it, and
@@ -85,6 +86,18 @@ def commit_change(command: str) -> tuple[str | None, int]:
     return (before if git("rev-parse", "HEAD") != before else None), status
 
 
+def start_ci(name: str) -> None:
+    """Re-push the branch of a pull request with ssh, so that its CI runs.
+
+    A pull request opened with the default GITHUB_TOKEN does not start CI workflows.
+    """
+    # needs to change something to get a different SHA, so bump commit time
+    later = int(git("log", "-1", "--format=%ct")) + 1
+    amend = ["git", "commit", "--amend", "--no-edit", "--allow-empty"]
+    subprocess.run(amend, cwd=ROOT, check=True, env=os.environ | {"GIT_COMMITTER_DATE": f"{later} +0000"})
+    git("push", "--force", "origin", f"HEAD:refs/heads/{name}")
+
+
 def open_pull_request(name: str, label: str, before: str, repository: str, draft_note: str) -> str:
     """Push what the command committed to the branch this run owns, and open its pull request.
 
@@ -103,6 +116,9 @@ def open_pull_request(name: str, label: str, before: str, repository: str, draft
     base = os.environ["GITHUB_REF_NAME"]
     options = ["--head", name, "--base", base, "--label", label, "--title", title, "--body", body]
     url = gh("pr", "create", *options, *(["--draft"] if draft_note else []))
+    # A branch already known to be broken is not worth a CI run, only the note saying so.
+    if not draft_note:
+        start_ci(name)
     return url.rsplit("/", 1)[-1]
 
 

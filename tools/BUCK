@@ -5,7 +5,7 @@
 
 load("//:tine.lock.json", _pins = "value")
 load("//box:defs.bzl", "box")
-load("//python:defs.bzl", "tine_python_binary")
+load("//python:defs.bzl", "box_python_binary", "tine_python_binary")
 load(":defs.bzl", "http_tool")
 
 _RELEASE = "tine//catalog:fedora.rawhide.release"
@@ -94,7 +94,11 @@ box.new(
         # for "importer srpm"
         "dist-git-client",
         "gawk",
+        # for setup-deploy-key
+        "gh",
         "git-core",
+        # ssh-keygen for setup-deploy-key
+        "openssh-clients",
         # for the assertions over generated certificates
         "openssl",
         "rpm-build",
@@ -181,6 +185,14 @@ box.python_test(
 tine_python_binary(
     name = "bot-pr",
     main = "bot_pr.py",
+    visibility = ["PUBLIC"],
+)
+
+# PUBLIC: run by repository admin once. Relaxed, it uses the host's gh login and checkout.
+box_python_binary(
+    name = "setup-deploy-key",
+    box = ":dev.box",
+    main = "setup_deploy_key.py",
     visibility = ["PUBLIC"],
 )
 
