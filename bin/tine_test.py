@@ -2067,9 +2067,6 @@ fbsource = none
 [external_cells]
 prelude = bundled
 
-[parser]
-target_platform_detector_spec = target:tine//...->tine//platforms:default
-
 [build]
 execution_platforms = tine//platforms:default
 
@@ -2104,13 +2101,6 @@ class TestRenderProjectBuckconfig(unittest.TestCase):
         # alias to this cell rather than a cell of the project's.
         self.assertEqual(cells["prelude"], "prelude")
         self.assertEqual(self.config("vendor/tine")["cell_aliases"]["toolchains"], "tine")
-
-    def test_the_project_gets_a_platform_for_its_own_targets_too(self) -> None:
-        detector = self.config()["parser"][tine.DETECTOR].split()
-        # This cell's platform, not the prelude's: that is what gives the project the shared cache.
-        self.assertEqual(
-            detector, [f"target:{cell}//...->tine//platforms:default" for cell in ("root", "tine")]
-        )
 
     def test_the_project_runs_actions_on_the_cell_s_platform(self) -> None:
         # Copied rather than rewritten, and it is what gives the project the shared cache.
@@ -2166,7 +2156,6 @@ class TestRefreshProjectBuckconfig(unittest.TestCase):
         self.assertEqual(config["cells"]["app"], "app")
         self.assertEqual(config["cells"]["tine"], "vendor/tine")
         self.assertIn('# Project cells\nroot = "."\napp = "app"', self.cells.read_text())
-        self.assertIn("target:root//...->", config["parser"][tine.DETECTOR])
 
     def test_native_cell_declarations_select_and_survive_refresh(self) -> None:
         self.source.write_text(self.updated)

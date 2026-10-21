@@ -1,9 +1,14 @@
 # SPDX-FileCopyrightText: Amutable GmbH <https://amutable.com/>
 # SPDX-License-Identifier: MPL-2.0
 
-"""Spike: modifier cfg constructor that keeps tine's platform labels."""
+"""Spike: modifier cfg constructor that keeps tine's platform labels.
+
+The root cell's root PACKAGE calls `set_cfg_constructor()`, and every cell's root PACKAGE calls the
+prelude's `set_cfg_modifiers(default_modifiers())`; the prelude refuses the latter from a .bzl file.
+"""
 
 load("@prelude//cfg/modifier:cfg_constructor.bzl", "cfg_constructor_post_constraint_analysis", "cfg_constructor_pre_constraint_analysis")
+load("@prelude//cfg/modifier:common.bzl", "MODIFIER_METADATA_KEY")
 load("@prelude//platforms:defs.bzl", "host_configuration")
 load(":architecture.bzl", "ARCHITECTURES")
 
@@ -17,11 +22,11 @@ _DISTRIBUTION = "tine//distribution:distribution"
 def _labels(cfg: ConfigurationInfo) -> dict[str, str]:
     return {str(setting): str(value.label) for setting, value in cfg.constraints.items()}
 
-def stage0(**kwargs):
+def _stage0(**kwargs):
     refs, params = cfg_constructor_pre_constraint_analysis(**kwargs)
     return refs + _HOST_REFS + _PLATFORMS, params
 
-def stage1(*, refs: dict[str, ProviderCollection], params) -> PlatformInfo:
+def _stage1(*, refs: dict[str, ProviderCollection], params) -> PlatformInfo:
     # An exec dep is built for the host whatever PACKAGE says, so a checkout's default distribution
     # does not reconfigure every tool; `host_transition` relies on that too.
     if params.configuring_exec_dep:
@@ -44,3 +49,20 @@ def stage1(*, refs: dict[str, ProviderCollection], params) -> PlatformInfo:
         if _labels(platform.configuration) == constraints:
             return platform
     return result
+
+def set_cfg_constructor() -> None:
+    """Register the constructor, if called from the root cell; Buck only takes it from its root PACKAGE."""
+    if read_root_config("cells", get_cell_name()) != ".":
+        return
+    native.set_cfg_constructor(
+        stage0 = _stage0,
+        stage1 = _stage1,
+        key = MODIFIER_METADATA_KEY,
+        aliases = struct(),
+        extra_data = struct(),
+    )
+
+def default_modifiers() -> list[str]:
+    """The host, and the distribution a checkout's `.buckconfig.local` may default to."""
+    distribution = read_root_config("tine", "distribution")
+    return [host_configuration.cpu, host_configuration.os] + ([distribution] if distribution else [])
