@@ -15,6 +15,7 @@ distribution does not serve, the transition leaves the constraint unset.
 """
 
 load("@prelude//:rules.bzl", "constraint_value")
+load("@prelude//cfg/modifier:types.bzl", "ConditionalModifierInfo", "ModifiersMatchInfo")
 load("//platforms:architecture.bzl", "ARCHITECTURES", "architecture")
 
 def _distribution_impl(ctx: AnalysisContext) -> list[Provider]:
@@ -42,7 +43,8 @@ def _distribution_impl(ctx: AnalysisContext) -> list[Provider]:
         )
 
     # One target answers every question asked of a distribution: it is the key a `select()`
-    # branches on, the transition that puts it there, and a platform to build against. The
+    # branches on, the transition that puts it there, and a modifier to build with. As a modifier it
+    # sets the constraint only on a cpu the distribution serves, like the transition. The
     # configuration stays the constraint alone, so a `select()` on it matches whatever else the
     # platform carries; the platform adds it to the base one, so choosing a distribution does not
     # drop the cpu and os the base platform brought. A base cpu the distribution does not serve gets
@@ -52,6 +54,13 @@ def _distribution_impl(ctx: AnalysisContext) -> list[Provider]:
         DefaultInfo(),
         ConfigurationInfo(constraints = {value.setting.label: value}, values = {}),
         TransitionInfo(impl = select_distribution),
+        ConditionalModifierInfo(
+            key = value.setting.label,
+            inner = ModifiersMatchInfo(
+                selector = [(configuration[ConfigurationInfo], value) for configuration in ctx.attrs.architectures],
+                default = None,
+            ),
+        ),
         PlatformInfo(
             label = str(ctx.label.raw_target()),
             configuration = ConfigurationInfo(

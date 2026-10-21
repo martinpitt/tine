@@ -14,4 +14,7 @@ native.set_cfg_constructor(
     extra_data = struct(),
 )
 
-set_cfg_modifiers([host_configuration.cpu, host_configuration.os])
+# A checkout can default to one distribution in its `.buckconfig.local`.
+distribution = read_config("tine", "distribution")
+
+set_cfg_modifiers([host_configuration.cpu, host_configuration.os] + ([distribution] if distribution else []))

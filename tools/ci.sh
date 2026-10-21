@@ -188,9 +188,8 @@ case $(uname -m) in
     x86_64) other=arm64 ;;
     *) other=x86_64 ;;
 esac
-for modifier in "config//cpu:$other" tine//catalog:debian.testing.distribution.constraint; do
-    name=${modifier##*:}
-    group "graph-${name%.constraint}" -- "${buck[@]}" bxl -m "$modifier" tine//tools/graph.bxl:analyze -- --pattern "$pattern"
+for modifier in "config//cpu:$other" tine//catalog:debian.testing.distribution; do
+    group "graph-${modifier##*:}" -- "${buck[@]}" bxl -m "$modifier" tine//tools/graph.bxl:analyze -- --pattern "$pattern"
 done
 # First invocation fetches buck's pinned tools and builds the shared box; kept its own group so
 # bootstrap time stays visible.

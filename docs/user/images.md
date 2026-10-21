@@ -1093,18 +1093,21 @@ tine//examples/image:boot-demo is incompatible with tine//platforms:default
     (tine//distribution:no-distribution-chosen unsatisfied)
 ```
 
-A distribution is also a platform, so a developer who builds one of them all day can name it as the
-default for unqualified targets in `.buckconfig.local`, below the block `bin/tine` generates there,
+A distribution is also a configuration modifier, so one build can choose it with
+`-m //catalog:<family>.<release>.distribution`. A developer who builds one of them all day can make it
+the default for unqualified targets in `.buckconfig.local`, below the block `bin/tine` generates there,
 which is git-ignored and belongs to the checkout rather than the repository:
 
 ```ini
-[parser]
-target_platform_detector_spec = target:tine//...->//catalog:<family>.<release>.distribution
+[tine]
+distribution = root//catalog:<family>.<release>.distribution
 ```
 
-That platform is the base one plus the distribution's constraint, so choosing a distribution does not
-drop the cpu and os the base platform carries. Nothing in the repository sets it: an unqualified target
-means "no distribution chosen" everywhere except a checkout that has said otherwise.
+The label needs its cell, unlike one given with `-m`.
+
+The modifier only adds the distribution's constraint, on an architecture the distribution serves, so
+choosing a distribution does not drop the cpu and os. Nothing in the repository sets it: an unqualified
+target means "no distribution chosen" everywhere except a checkout that has said otherwise.
 
 A consuming project adds `//packages/fedora/rawhide:zlib-ng`, which validates package import,
 package-manager selection, buildroot assembly and RPM collection (packages with `buildroot_deps`
