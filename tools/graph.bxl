@@ -21,7 +21,8 @@ def _impl(ctx: bxl.Context) -> None:
     targets = ctx.uquery().eval(pattern)
     ctx.output.print("{}: {} targets load".format(pattern, len(targets)))
 
-    configured = ctx.configured_targets(targets)
+    # Unlike `--target-platforms`, BXL does not apply the invocation's `-m` on its own.
+    configured = ctx.configured_targets(targets, modifiers = ctx.modifiers)
     skipped = len(targets) - len(configured)
     ctx.output.print("{} configure, {} skipped as incompatible".format(len(configured), skipped))
 
