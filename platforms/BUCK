@@ -14,7 +14,8 @@ execution_platform(
     visibility = ["PUBLIC"],
 )
 
-# A target platform per supported architecture; select with `--target-platforms`
+# A target platform per supported architecture, which transitions and the cfg constructor name
+# configurations after; build for one with `-m config//cpu:<arch>`
 [
     target_platform(
         name = name,

@@ -61,8 +61,8 @@ def _spelling(name: str, schema: str) -> str:
 def _configured() -> Select:
     """A rule's attribute default for the architecture being built for.
 
-    Under the target configuration (plain `dep`) this is the host's, unless `--target-platforms` picks
-    another. Under the execution configuration (`exec_dep`), it is always the host's.
+    Under the target configuration (plain `dep`) this is the host's, unless `-m config//cpu:<arch>`
+    picks another. Under the execution configuration (`exec_dep`), it is always the host's.
     """
     return _select({name: name for name in ARCHITECTURES})
 
