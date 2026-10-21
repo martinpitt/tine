@@ -21,7 +21,11 @@ def stage0(**kwargs):
     return refs + _HOST_REFS + _PLATFORMS, params
 
 def stage1(*, refs: dict[str, ProviderCollection], params) -> PlatformInfo:
-    result = cfg_constructor_post_constraint_analysis(refs = refs, params = params)
+    # An exec dep is built for the host whatever PACKAGE says, so a checkout's default distribution
+    # does not reconfigure every tool; `host_transition` relies on that too.
+    if params.configuring_exec_dep:
+        return params.legacy_platform
+    result =cfg_constructor_post_constraint_analysis(refs = refs, params = params)
     constraints = _labels(result.configuration)
     host = {}
     for ref in _HOST_REFS:
