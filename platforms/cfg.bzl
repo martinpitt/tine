@@ -12,6 +12,7 @@ load(":architecture.bzl", "ARCHITECTURES")
 _HOST = "tine//platforms:default"
 _HOST_REFS = [host_configuration.cpu, host_configuration.os]
 _PLATFORMS = ["tine//platforms:" + name for name in ARCHITECTURES]
+_DISTRIBUTION = "tine//distribution:distribution"
 
 def _labels(cfg: ConfigurationInfo) -> dict[str, str]:
     return {str(setting): str(value.label) for setting, value in cfg.constraints.items()}
@@ -25,8 +26,14 @@ def stage1(*, refs: dict[str, ProviderCollection], params) -> PlatformInfo:
     # does not reconfigure every tool; `host_transition` relies on that too.
     if params.configuring_exec_dep:
         return params.legacy_platform
-    result =cfg_constructor_post_constraint_analysis(refs = refs, params = params)
+    result = cfg_constructor_post_constraint_analysis(refs = refs, params = params)
     constraints = _labels(result.configuration)
+
+    # Named after the distribution like its platform was, which `distribution.new()` declares beside
+    # the constraint value.
+    distribution = constraints.pop(_DISTRIBUTION, None)
+    if distribution:
+        return PlatformInfo(label = distribution.removesuffix(".constraint"), configuration = result.configuration)
     host = {}
     for ref in _HOST_REFS:
         host.update(_labels(refs[ref][ConfigurationInfo]))
